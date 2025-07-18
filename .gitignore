@@ -2,3 +2,8 @@
 .Rhistory
 .RData
 .Ruserdata
+emt_bhtopo_26node_CLAMP/
+emt_ffctopo_72node_CLAMP_2025/
+EMTDriveR_2025.Rproj
+hpcfiles/
+renv/
