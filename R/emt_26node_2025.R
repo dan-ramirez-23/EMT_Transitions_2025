@@ -15,6 +15,8 @@ library(viridis)
 library(ComplexHeatmap)
 library(igraph)
 library(keyplayer)
+library(mclust)
+library(cluster)
 source("R/utils.R")
 source("R/utils_clamping.R")
 source("R/scratch.R")
@@ -61,9 +63,9 @@ simTime <- 200
 # simulate WT with RACIPE
 racipe_fname <- file.path(topoDir, "racipe_100IC.Rds")
 if(!file.exists(racipe_fname)) {
-  racipe <- sRACIPE::sracipeSimulate(circuit = topo, numModels = numModels, 
-                                     nIC = numICs, simulationTime = simTime, initialNoise = 0, nNoise = 0)  
-  
+  racipe <- sRACIPE::sracipeSimulate(circuit = topo, numModels = numModels,
+                                     nIC = numICs, simulationTime = simTime, initialNoise = 0, nNoise = 0)
+
   saveRDS(racipe, racipe_fname)
 } else {
   racipe <- readRDS(racipe_fname)
@@ -95,8 +97,8 @@ if(!file.exists(ss_unique_fname)) {
   ss_unique <- ss_rounded %>%
     distinct()
   ss_unique$StateIndex <- unique_state_idx
-  
-  
+
+
   saveRDS(ss_unique, ss_unique_fname)
 } else {
   ss_unique <- readRDS(ss_unique_fname)
@@ -111,15 +113,15 @@ if(!file.exists(pca_fname)) {
   # PCA on full data
   pca <- prcomp(exprMat_norm[ss_unique$StateIndex,1:nGenes])
   pca_df_full <- as.data.frame(pca$x)
-  
+
   # We will flip PC2 for consistency with other visualizations
   pca_df_full$PC2 <- -1 * pca_df_full$PC2
   pca$rotation[,2] <- -1 * pca$rotation[,2]
   pca$x[,2] <- -1 * pca$x[,2]
-  
+
   # sanity check: plot colored by Cdh1
   ggplot(pca_df_full, aes(x=PC1, y=PC2, color=ss_unique$Cdh1)) + geom_point()
-  
+
   saveRDS(pca, pca_fname)
 } else {
   pca <- readRDS(pca_fname)
@@ -134,45 +136,45 @@ sil_df_fname <- file.path(dataDir, "silhouette_df.Rds")
 calc_silhouette <- function(X, k_range) {
   silhouette_means <- c()
   nll_values <- c()
-  
+
   for (k in k_range) {
     gmm_model <- Mclust(X, G = k, verbose = FALSE)
     clusters <- gmm_model$classification
     sil <- silhouette(clusters, dist(X))
     silhouette_means <- c(silhouette_means, mean(sil[, 3]))
   }
-  
+
   df <- data.frame(Clusters=k_range, Silhouette=silhouette_means)
-  
+
   return(df)
-  
+
 }
 
 # Identify optimal k
 if(!file.exists(sil_df_fname)) {
   k_range <- 2:8
-  
+
   sil_df <- calc_silhouette(exprMat_norm[ss_unique$StateIndex,1:nGenes], k_range)
   saveRDS(sil_df, sil_df_fname)
 }
 
 
 
-clust_all_fname <- file.path(dataDir,"clust_all_2025.Rds") 
+clust_all_fname <- file.path(dataDir,"clust_all_2025.Rds")
 num_pcs_clustering <- 15 # First 15 PCs cover ~93% of variance
 if(!file.exists(clust_all_fname)) {
   # fit GMM model
   gmm = GMM(pca_df_full[,1:num_pcs_clustering], 2, dist_mode = "eucl_dist", seed_mode = "random_subset", km_iter = 10,
             em_iter = 10, verbose = F)
-  
+
   # predict centroids, covariance matrix and weights
   clust_full = predict(gmm, newdata = pca_df_full[,1:num_pcs_clustering])
-  
+
   # Im reversing it so the initial (left-side) state is cluster 1
   revClust <- clust_full
   revClust <- ifelse(clust_full == 1, 2, ifelse(clust_full == 2, 1, clust_full))
   clust_full <- revClust
-  
+
   ggplot(pca_df_full, aes(x=PC1, y=PC2, color=as.factor(clust_full))) + geom_point()
   ggplot(pca_df_full, aes(x=PC1, y=PC2, color=exprMat_norm[ss_unique$StateIndex,"Cdh1"])) + geom_point()
 
@@ -203,10 +205,10 @@ if(!file.exists(racipe_bistable_fname)) {
         any(Cluster == 1) & any(Cluster == 2) ~ 'bistable'
       )
     )
-  
+
   # filter for models with <10 states, only bistable
   # save new racipe object w/ only bistable
-  models_selected <- unlist(summary_df[which(summary_df$NumStates == 2 & 
+  models_selected <- unlist(summary_df[which(summary_df$NumStates == 2 &
                                                summary_df$Stability == "bistable"),"Model"])[1:500]
   keepIdx <- c()
   unique_state_idx_list <- c()
@@ -214,21 +216,21 @@ if(!file.exists(racipe_bistable_fname)) {
     # Select only epithelial state, and first epithelial state if multiple
     modelStates <- ss_unique[which(ss_unique$Model == model & ss_unique$Cluster == 1),]
     addIdx <- sample(which(row.match(
-      as.data.frame(t(round(assay(racipe), 1)))[(numICs*(model-1)+1):(numICs*model),], 
-      modelStates[,genes], 
+      as.data.frame(t(round(assay(racipe), 1)))[(numICs*(model-1)+1):(numICs*model),],
+      modelStates[,genes],
       nomatch = NA) == 1), 1)
     addIdx <- numICs*(model-1)+addIdx # bring back index for original racipe object
     keepIdx <- c(keepIdx, addIdx)
-    
+
     unique_state_idx <- which(ss_unique$Model == model & ss_unique$Cluster == 1)
     unique_state_idx_list <- c(unique_state_idx_list, unique_state_idx)
   }
-  
+
   # subset racipe object for bistable models, update parameters
   racipe_bistable <- racipe[,keepIdx]
   sracipeParams(racipe_bistable) <- sracipeParams(racipe)[as.numeric(unname(models_selected)),] # parameter numbering is messssssed up in sRACIPE, not my fault
   racipe_bistable@metadata$config$simParams[["numModels"]] <- length(keepIdx)
-  
+
   saveRDS(racipe_bistable, racipe_bistable_fname)
   saveRDS(models_selected, models_selected_fname)
   saveRDS(keepIdx, racipe_bistable_indices_fname)
@@ -265,29 +267,176 @@ if(!file.exists(clamp_df_fname)) {
     # add steady states for cluster 1 and 2
     addIdx <- which(ss_unique$Model == model)
     keepIdx <- c(keepIdx, addIdx)
-    
+
   }
-  clamp_df <- pivot_longer(ss_unique[keepIdx,], cols = all_of(genes), 
+  clamp_df <- pivot_longer(ss_unique[keepIdx,], cols = all_of(genes),
                            names_to = "Gene", values_to = "Expression")
   clamp_df$ModelIndex <- as.numeric(factor(clamp_df$Model))
   saveRDS(clamp_df, clamp_df_fname)
-  
-  clamp_df_full <- pivot_longer(ss_unique[,], cols = all_of(genes), 
+
+  clamp_df_full <- pivot_longer(ss_unique[,], cols = all_of(genes),
                                 names_to = "Gene", values_to = "Expression")
   clamp_df_full$ModelIndex <- as.numeric(factor(clamp_df_full$Model))
   saveRDS(clamp_df_full, clamp_df_full_fname)
-  
+
 } else {
   clamp_df <- readRDS(clamp_df_fname)
   clamp_df_full <- readRDS(clamp_df_full_fname)
 }
+
+######## NOISE-ONLY CONTROL SIMULATIONS #####
+## Simulate trials with various noise levels & no (effective) signal
+## Track number of transitions over time
+
+ctrl_simTime <- 200
+ctrl_relaxTime <- 50
+ctrl_tcorr <- 10
+initClust <- 1
+tgtClust <- 2
+
+
+
+ctrl_data_dir <- file.path(dataDir, "noise_only_controls")
+if(!dir.exists(ctrl_data_dir)) {
+  dir.create(ctrl_data_dir)
+}
+
+
+ctrl_noise_levels <- c(0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.5, 1, 2)
+ctrl_trial_expr <- as.data.frame(t(assay(racipe_bistable)))
+ctrl_trials_per_noise <- 10
+
+ctrl_indices <- c()
+for(model in models_selected) {
+  clust_pick <- sample(c(1,2),1)
+  idx_add <- ss_unique[which(ss_unique$Model == model), "StateIndex"]
+  ctrl_indices <- c(ctrl_indices, idx_add)
+}
+
+# create RACIPE object with equal split of E and M steady states to begin
+racipe_ctrl_placeholder <- racipe[, ctrl_indices]
+sracipeParams(racipe_ctrl_placeholder) <- sracipeParams(racipe)[rep(as.numeric(unname(models_selected)), each=2),]
+sracipeIC(racipe_ctrl_placeholder) <- assay(racipe_ctrl_placeholder)[,]
+racipe_ctrl_placeholder@metadata$config$simParams[["numModels"]] <- length(ctrl_indices)
+racipe_ctrl_placeholder@metadata$config$simParams["nIC"] <- 1
+ctrl_init_data_norm <- as.data.frame(t(assay(racipe_ctrl_placeholder)))
+ctrl_init_data_norm[,genes] <- log2(1+ctrl_init_data_norm[,genes]) # Log transform
+ctrl_init_data_norm[,genes] <- sweep(ctrl_init_data_norm[,genes], 2, tmpMeans, FUN = "-") # scale
+ctrl_init_data_norm[,genes] <- sweep(ctrl_init_data_norm[,genes], 2, tmpSds, FUN = "/") # scale
+ctrl_init_pca <- scale(ctrl_init_data_norm, pca$center, pca$scale) %*% pca$rotation
+ctrl_init_clusts <- knn_classifier(ctrl_init_pca[,1:num_pcs_clustering], pca_df_full[,1:num_pcs_clustering], clust_full, k=25)
+
+
+
+ctrl_results_df_fname <- file.path(ctrl_data_dir,
+                                   paste0("ctrl_summary_trials=",ctrl_trials_per_noise,
+                                          "_noise=",paste0(ctrl_noise_levels, collapse = ","),
+                                          "_tcorr=",ctrl_tcorr))
+if(!file.exists(ctrl_results_df_fname)) {
+
+  ctrl_results_df <- data.frame(Noise=rep(ctrl_noise_levels, each=ctrl_trials_per_noise),
+                                Trial=rep(1:ctrl_trials_per_noise, length(ctrl_noise_levels)),
+                                Init_E=length(which(ctrl_init_clusts==1)),
+                                Final_E=NA,
+                                Init_M=length(which(ctrl_init_clusts==2)),
+                                Final_M=NA,
+                                NumConverting=NA,
+                                NumRebellious=NA,
+                                PctConverting=NA,
+                                PctRebellious=NA)
+
+  for(ctrl_current_noise in ctrl_noise_levels[1:4]) {
+    for(ctrl_current_trial in 1) {
+
+      # Set up placeholder racipe object
+      racipe_ctrl <- racipe_ctrl_placeholder
+
+      # Set ICs to WT steady states
+      sracipeIC(racipe_ctrl) <- assay(racipe_ctrl_placeholder)[,]
+
+      # Simulate with noise for a duration
+      fname_racipe_ctrl <- file.path(ctrl_data_dir,
+                                     paste0("racipe_ctrl_noise=",ctrl_current_noise,
+                                            "_trial=",ctrl_current_trial,".Rds"))
+      if(!file.exists(fname_racipe_ctrl)) {
+        racipe_ctrl <- sracipeSimulate(racipe_ctrl, genIC = F, genParams = F, simulationTime = ctrl_simTime,
+                                       initialNoise=ctrl_current_noise, nNoise=1, scaledNoise = T,
+                                       integrateStepSize = 0.2, simDet=F, stepper = "EM_OU", ouNoise_t=ctrl_tcorr,
+                                       nCores = 1)
+        saveRDS(racipe_ctrl, fname_racipe_ctrl)
+
+      } else {
+        racipe_ctrl <- readRDS(fname_racipe_ctrl)
+      }
+
+      # Remove noise and simulate relaxation phase
+      racipe_ctrl_relax_fname <- file.path(ctrl_data_dir,
+                                           paste0("racipe_ctrl_noise=",ctrl_current_noise,
+                                                  "_trial=",ctrl_current_trial,"_relaxed.Rds"))
+      if(!file.exists(racipe_ctrl_relax_fname)) {
+        # Remove signal
+        racipe_ctrl_relax <- racipe_ctrl
+        sracipeParams(racipe_ctrl_relax) <- sracipeParams(racipe_ctrl)
+        # Set ICs to perturbed steady states
+        sracipeIC(racipe_ctrl_relax) <- assay(racipe_ctrl, as.character(ctrl_current_noise))[,]
+
+
+        racipe_ctrl_relax <- sracipeSimulate(racipe_ctrl_relax, genIC = F, genParams = F, simulationTime = ctrl_relaxTime,
+                                             integrateStepSize = 0.2, nNoise = 0, iNoise = 0, nCores = 1, simDet = T)
+        saveRDS(racipe_ctrl_relax, racipe_ctrl_relax_fname)
+
+
+      } else {
+        racipe_ctrl_relax <- readRDS(racipe_ctrl_relax_fname)
+      }
+
+      # Rescale data & assign clusters to perturbed data
+      racipe_ctrl_final <- as.data.frame(t(assay(racipe_ctrl_relax)))
+      nCols <- ncol(racipe_ctrl_final)
+      racipe_ctrl_final[,1:nCols] <- log2(1+racipe_ctrl_final[,1:nCols]) # Log transform
+      racipe_ctrl_final[,1:nCols] <- sweep(racipe_ctrl_final[,1:nCols], 2, tmpMeans, FUN = "-") # scale
+      racipe_ctrl_final[,1:nCols] <- sweep(racipe_ctrl_final[,1:nCols], 2, tmpSds, FUN = "/") # scale
+      newpca <- scale(racipe_ctrl_final, pca$center, pca$scale) %*% pca$rotation
+
+      # assign clusters to final states
+      newlabels <- knn_classifier(newpca[,1:num_pcs_clustering], pca_df_full[,1:num_pcs_clustering], clust_full, k=25)
+
+
+      # Compute & store # of transitions
+      numTransitions <- length(which(newlabels == tgtClust & ctrl_init_clusts == initClust))
+      numRebellious <- length(which(newlabels == initClust & ctrl_init_clusts == tgtClust))
+
+
+      ctrl_results_df[which(ctrl_results_df$Noise == ctrl_current_noise &
+                              ctrl_results_df$Trial == ctrl_current_trial), "Final_E"] <- length(which(newlabels == 1))
+      ctrl_results_df[which(ctrl_results_df$Noise == ctrl_current_noise &
+                              ctrl_results_df$Trial == ctrl_current_trial), "Final_M"] <- length(which(newlabels == 2))
+      ctrl_results_df[which(ctrl_results_df$Noise == ctrl_current_noise &
+                              ctrl_results_df$Trial == ctrl_current_trial), "NumConverting"] <- numTransitions
+      ctrl_results_df[which(ctrl_results_df$Noise == ctrl_current_noise &
+                              ctrl_results_df$Trial == ctrl_current_trial), "NumRebellious"] <- numRebellious
+      ctrl_results_df[which(ctrl_results_df$Noise == ctrl_current_noise &
+                              ctrl_results_df$Trial == ctrl_current_trial), "PctConverting"] <- numTransitions / length(which(ctrl_init_clusts == 1))
+      ctrl_results_df[which(ctrl_results_df$Noise == ctrl_current_noise &
+                              ctrl_results_df$Trial == ctrl_current_trial), "PctRebellious"] <- numRebellious / length(which(ctrl_init_clusts == 2))
+
+    }
+  }
+
+  saveRDS(ctrl_results_df, ctrl_results_df_fname)
+
+} else {
+  ctrl_results_df <- readRDS(ctrl_results_df_fname)
+}
+
+
 
 
 ########## SIMULATIONS WITH CLAMPING ############
 signal_simTime <- 500
 signal_relaxTime <- 50
 signal_nGenes <- c(1,2)
-signal_noise <- c(0, 0.04, 0.2) #0.04
+signal_noise <- c(0, 0.04, 0.2)
 signal_tcorr <- 10
 initClust <- 1
 tgtClust <- 2
@@ -296,7 +445,7 @@ tgtClust <- 2
 expName <- paste0("bhtopo_t=",signal_simTime,"_relax_OUnoise=",paste0(signal_noise, collapse = "."),
                   "_tau=",signal_tcorr,"_genes=",paste0(signal_nGenes,collapse = "."),"_CLAMPS_2025")
 
-# For signaling, use prcomp object but replace embeddings with subset of models 
+# For signaling, use prcomp object but replace embeddings with subset of models
 pca_st <- pca
 pca_st$x <- pca_df
 
@@ -362,7 +511,7 @@ genes_x_transitions_matrix_fname <- file.path(topoDir, expName, "genes_x_transit
 resultSet_full <- readRDS(resultSet_fname)
 if("Species 2" %in% colnames(resultSet_full)) {
   resultSet_full$SigName_Short <- paste0(resultSet_full[,c("Species 1")], "_",
-                                         resultSet_full[,c("Species 2")])  
+                                         resultSet_full[,c("Species 2")])
 }
 
 rs_det <- resultSet_full[which(resultSet_full$Noise == 0),]
@@ -379,16 +528,16 @@ if(!"ConversionPct" %in% colnames(resultSet_full)) {
                                       tmpMeans = tmpMeans,
                                       tmpSds = tmpSds
   )
-  
+
   rsMatrix_full <- rs_full_list[[1]]
   rownames(rsMatrix_full) <- resultSet_full$SetName[which(!is.na(resultSet_full$ConversionPct))]
-  
+
   resultSet_full <- rs_full_list[[2]]
   resultSet_full$ConversionPct <- resultSet_full$ConvertingModels / resultSet_full$startingInitPopulation
-  
+
   saveRDS(resultSet_full, resultSet_fname)
   saveRDS(rsMatrix_full, genes_x_transitions_matrix_fname)
-} 
+}
 
 ######### Signal Characteristics #########
 # Import network into igraph
@@ -401,37 +550,37 @@ rownames(w) <- 1:nrow(w)
 
 if(!"GroupBetweenCentrality" %in% colnames(resultSet_full)) {
   for(i in rownames(resultSet_full)) {
-    
+
     # Identify nodes involved in signal
     genesInSignal <-  c(resultSet_full[i,"Species 1"], resultSet_full[i,"Species 2"])
     genesInSignal <- genesInSignal[which(!is.na(genesInSignal))]
-    
+
     genesInSignalIDs <- which(gene_id_list %in% genesInSignal)
-    
+
     # Compute group betweenness centrality
     bet_cent <- kpcent(w, genesInSignalIDs, type="betweenness")
-    
-    
+
+
     # Compute group closeness centrality
     close_cent <- kpcent(w, genesInSignalIDs, type="closeness")
-    
-    
+
+
     # Add to resultSet
     resultSet_full[i,"GroupBetweenCentrality"] <- bet_cent
     resultSet_full[i,"GroupClosenessCentrality"] <- close_cent
-    
+
   }
-  
+
   saveRDS(resultSet_full, resultSet_fname)
-} 
+}
 
 ######## EFFICACY ANALYSIS ############
 #debug(cells_x_signals)
 # in earlier workflows, I subset the data here - now it just takes all noise levels by default
 selectedNoise <- signal_noise
 cell_signal_df_fname <- file.path(topoDir,expName,
-                                  paste0("cell_signal_df_noise=", 
-                                         paste0(selectedNoise, collapse = ","),".Rds")) 
+                                  paste0("cell_signal_df_noise=",
+                                         paste0(selectedNoise, collapse = ","),".Rds"))
 if(!file.exists(cell_signal_df_fname)) {
   #undebug(cells_x_signals)
   cell_signal_df <- cells_x_signals(paramSets = resultSet_full, # dataframe w/ columns: ModelNo, SetName
@@ -447,8 +596,8 @@ if(!file.exists(cell_signal_df_fname)) {
                                     InitRawStates = unnormData,
                                     useDiffs = F)
   saveRDS(cell_signal_df, cell_signal_df_fname)
-  
-  
+
+
 } else {
   cell_signal_df <- readRDS(cell_signal_df_fname)
 }
@@ -476,20 +625,20 @@ if(!file.exists(sigEffs_1gene_racipe_fname)) {
   sigEffs_1gene_spin[which(sigEffs_1gene_spin$Species == "Snai1"),"ConversionPct"] <- 1
   sigEffs_1gene_spin[which(sigEffs_1gene_spin$Species == "Vim"),"ConversionPct"] <- 0.30
   sigEffs_1gene_spin[which(sigEffs_1gene_spin$Species == "Twist1"),"ConversionPct"] <- 0.85
-  
+
   sigEffs_1gene_racipe$ConversionPct_Spin <- sigEffs_1gene_spin$ConversionPct
-  
-  
-  
-  
+
+
+
+
   ## Correlation of 2-gene signals
   sigEffs_2gene_racipe <- resultSet_full[which(resultSet_full$NumGenes == 2 & resultSet_full$Noise == boolean_compare_noise), c("Species 1", "Species 2", "ConversionPct")]
   sigEffs_2gene_spin <- read.table(file.path(dataDir, "spin_2node_effs.dat"), sep = " ")
   rownames(sigEffs_2gene_spin) <- genes_reordered
   colnames(sigEffs_2gene_spin) <- genes_reordered
-  
+
   sigEffs_2gene_racipe$ConversionPct_Spin <- NA
-  
+
   find_index <- function(df, set) {
     for(row in rownames(df)) {
       rowGeneSet <- c(df[row,"Species 1"], df[row, "Species 2"])
@@ -498,17 +647,17 @@ if(!file.exists(sigEffs_1gene_racipe_fname)) {
       }
     }
   }
-  
+
   # populate matrix
   for(gene1 in genes_reordered) {
     for(gene2 in genes_reordered) {
       spinEff <- sigEffs_2gene_spin[gene1, gene2]
       idx <- find_index(sigEffs_2gene_racipe, c(gene1, gene2))
-      
+
       sigEffs_2gene_racipe[idx, "ConversionPct_Spin"] <- spinEff
     }
   }
-  
+
   # Save results
   saveRDS(sigEffs_2gene_racipe, file=sigEffs_2gene_racipe_fname)
   saveRDS(sigEffs_1gene_racipe, file=sigEffs_1gene_racipe_fname)
@@ -541,7 +690,7 @@ time_trial_resultSet_fname <- file.path(dataDir,"Zeb1_timeTrial_paramSets.Rds")
 if(!file.exists(time_trial_resultSet_fname)) {
   num_trials <- 10
   time_trial_geneinfo <- idGenes(clust=clust, initialClust=1, targetClust=2, expr=time_trial_expr)
-  time_trial_geneinfo <- topoOutDegrees(geneinfo = time_trial_geneinfo, 
+  time_trial_geneinfo <- topoOutDegrees(geneinfo = time_trial_geneinfo,
                                   topo = sracipeCircuit(racipe))
   time_trial_resultSet <- optimizeSTParams_Clamp(targetClust = 2,
                                            nSigGenes = 1,
@@ -550,16 +699,16 @@ if(!file.exists(time_trial_resultSet_fname)) {
   )
   time_trial_setIDList <- c(which(time_trial_resultSet$SetName %in% time_trial_sig_names))
   time_trial_setIDList <- rep(time_trial_setIDList, num_trials)
-  
+
   # Additional parameters to vary in time_trial simulations
   time_trial_resultSet$Tau <- rep(signal_tcorr, nrow(time_trial_resultSet))
   time_trial_resultSet$ScaledNoise <- rep(T, nrow(time_trial_resultSet))
   time_trial_resultSet <- time_trial_resultSet[time_trial_setIDList,]
   rownames(time_trial_resultSet) <- 1:nrow(time_trial_resultSet)
   time_trial_setIDList <- rownames(time_trial_resultSet)
-  
+
   saveRDS(time_trial_resultSet, file = time_trial_resultSet_fname)
-  
+
 } else {
   time_trial_resultSet <- readRDS(time_trial_resultSet_fname)
   time_trial_setIDList <- rownames(time_trial_resultSet)
@@ -584,7 +733,7 @@ for(setIDNo in 1:length(time_trial_setIDList)) {
   debug(calcTransitionRate)
   sampleSet_times <- calcTransitionRate(paramSets = time_trial_resultSet,
                                         setID = setID,
-                                        racipe = racipe_bistable_raw, 
+                                        racipe = racipe_bistable_raw,
                                         pca = pca_st,
                                         wt_data = exprMat_norm[ss_unique$StateIndex,genes], # matrix/dataframe of original data
                                         clust = clust, # vector of length numSamples containing integers
@@ -605,7 +754,7 @@ for(setIDNo in 1:length(time_trial_setIDList)) {
                                         simTimes = times,
                                         simTimeRelax = signal_relaxTime,
                                         save=T,
-                                        clamp=T) 
+                                        clamp=T)
 }
 
 ## Aggregate results
@@ -617,7 +766,7 @@ if(!file.exists(multiSet_fname)) {
   for(setIDNo in 1:length(time_trial_setIDList)) {
     setID <- time_trial_setIDList[setIDNo]
     expDir <- file.path(topoDir, time_trial_expName_list[setIDNo])
-    sampleSet_times <- readRDS(file.path(expDir, 
+    sampleSet_times <- readRDS(file.path(expDir,
                                          paste0("transitionTimes_",
                                                 time_trial_resultSet[setID,"SetName"],".Rds")))
     multiSet_times[[setIDNo]] <- sampleSet_times
@@ -632,9 +781,7 @@ if(!file.exists(multiSet_fname)) {
 
 
 
-######## NOISE-ONLY SIMULATIONS #####
-## Simulate trials with various noise levels & no (effective) signal
-## Track number of transitions over time
+
 
 
 
