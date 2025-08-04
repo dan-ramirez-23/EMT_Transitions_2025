@@ -1,73 +1,52 @@
 ########## SETUP ############
 
 rm(list=ls())
-library(sRACIPE)        # GRN simulations
-library(FNN)            # nearest neighbors
+library(sRACIPE) # from GitHub
+library(ggplot2)
+library(FNN)
 library(ClusterR)
 library(nnet)
-library(reshape2)       # data management
-library(dplyr)          # data management
-library(tidyr)          # data management
-library(prodlim)        # data management
-library(igraph)         # network theory tools
-library(limma)          # DEG analysis of simulated expression
+library(reshape2)
+library(dplyr)
+library(tidyr)
+library(prodlim)
+library(circlize)
+library(viridis)
+library(ComplexHeatmap) # from Bioconductor
+library(igraph)
 library(keyplayer)
-library(ggplot2)        # plotting
-library(cowplot)        # plotting (extract legend separately)
-library(ComplexHeatmap) # plotting
-library(circlize)       # plotting
-library(viridis)        # plotting
-library(tibble)         # plotting
-
+#library(forcats) not needed anymore(?)
+library(ggrepel) # for PCA loadings
+library(limma) # for DEG statistics
+library(cowplot) # for plotting
 source("R/utils.R")
 source("R/utils_clamping.R")
 source("R/scratch.R")
 
 # set up directories
-topoName <- "emt_bhtopo_26node_CLAMP"
+topoName <- "emt_ffctopo_72node_CLAMP_2025"
 topoDir <- file.path(getwd(),topoName)
-plotDir <- file.path(topoDir,"plots_apr2025")
+plotDir <- file.path(topoDir,"plots")
 dataDir <- file.path(topoDir,"data")
-
-if(!dir.exists(topoDir)) {
-  dir.create(topoDir)
-}
-if(!dir.exists(dataDir)) {
-  dir.create(dataDir)
-}
-if(!dir.exists(plotDir)) {
-  dir.create(plotDir)
-}
-
 
 # load topology
 topo <- loadTopo(topoName)
 nGenes <- length(unique(c(topo$Source, topo$Target)))
-genes_reordered <- c("Foxc2","Zeb1","Klf8","Cdh1","miR101", "Zeb2", "Snai1", "miR141",
-                     "Tgfbeta","miR200a","miR200b","miR200c","miR205","miR30c","Snai2",
-                     "miR34a","Twist2","miR9","Vim","Twist1","Tcf3","Gsc", "Ovol2", "Grhl2",  "Np63a", "Cldn7")
+genes <- unique(c(topo$Source, topo$Target))
 
-# seed for reproducibility & color palette for plots
 set.seed(1234)
 cbPalette <- c("#000000", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")[c(3,2,4:8)]
 
+# Racipe setup for later
+nModels <- 2000
+#nModelsFromPyracipe <- -1
+racipe_placeholder <- sracipeSimulate(topo, numModels = nModels, plots = FALSE, genIC = TRUE,
+                                      genParams = TRUE, integrate = FALSE, integrateStepSize = 0.01,
+                                      simulationTime = 0.1, initialNoise = 0, nNoise = 0, simDet = T, anneal = F
+)
 
-# print topology
-#plotNetwork(topo, topoName)
-
-
-racipe_cont_fname <- file.path(topoDir, "racipe_100IC_continued.Rds")
-racipe <- readRDS(racipe_cont_fname)
-genes <- rownames(racipe)
-unnormData <- t(assay(racipe))
-simExp <- assay(racipe, 1)
-simExp <- log2(1+simExp)
-tmpMeans <- rowMeans(simExp)
-tmpSds <- apply(simExp,1,sd)
-
-racipeNorm <- sracipeNormalize(racipe)
-racipeData <- as.data.frame(t(assay(racipeNorm)))
-exprMat_norm <- racipeData
+racipe <- racipe_placeholder
+colOrder <- rownames(sracipeIC(racipe))
 
 # plotting utility
 square_plot <- function(p) {
@@ -88,17 +67,54 @@ square_plot <- function(p) {
   
 }
 
+########## UNTREATED CONDITION (FROM PYRACIPE) ############
+# read data from pyracipe
+pracipe_dir <- file.path(getwd(),paste0("../pyracipe/emt_ffctopo_72node_5k200ic"))
+pyracipeNorm <- read.csv(file.path(pracipe_dir,
+                                   paste0("emt_ffctopo_72node_5k200ic",
+                                          "_pyracipe_states_2025_combined.csv")), row.names = 1)
+rownames(pyracipeNorm) <- 1:nrow(pyracipeNorm)
+
+pyracipe_summary <- read.csv(file.path(pracipe_dir,
+                                       paste0("emt_ffctopo_72node_5k200ic",
+                                              "_pyracipe_summary_2025_combined.csv")), row.names = 1)
+rownames(pyracipe_summary) <- 1:nrow(pyracipe_summary)
+
+pyracipe_metadata <- read.csv(file.path(pracipe_dir,
+                                        paste0("emt_ffctopo_72node_5k200ic",
+                                               "_pyracipe_metadata_2025_combined.csv")), row.names = 1)
+rownames(pyracipe_metadata) <- 1:nrow(pyracipe_metadata)
+pyracipe_metadata$Index <- 1:nrow(pyracipe_metadata)
+
+pyracipe_params <- read.csv(file.path(pracipe_dir,
+                                      paste0("emt_ffctopo_72node_5k200ic",
+                                             "_pyracipe_params_2025_combined.csv")), 
+                            check.names = F, row.names = 1)
+rownames(pyracipe_params) <- 1:nrow(pyracipe_params)
+
+pyracipe_raw_states <- read.csv(file.path(pracipe_dir,
+                                          paste0("emt_ffctopo_72node_5k200ic",
+                                                 "_pyracipe_states_unStdized_2025_combined.csv")), row.names = 1)
+rownames(pyracipe_raw_states) <- 1:nrow(pyracipe_raw_states)
+pyracipe_raw_states <- 2^pyracipe_raw_states
+pyracipe_raw_states$Index <- 1:nrow(pyracipe_raw_states)
+
+tmpMeans <- rowMeans(log2(t(pyracipe_raw_states)))[colOrder]
+tmpSds <- apply(log2(t(1+pyracipe_raw_states)),1,sd)[colOrder]
+
+
+# regenerate norm data with pseudocount to make normalization consistent
+nCols <- ncol(pyracipeNorm)
+pyracipeNorm <- log2(1+pyracipe_raw_states[,colOrder])
+pyracipeNorm[,1:nCols] <- sweep(pyracipeNorm[,1:nCols], 2, tmpMeans, FUN = "-") # scale
+pyracipeNorm[,1:nCols] <- sweep(pyracipeNorm[,1:nCols], 2, tmpSds, FUN = "/") # scale
+
 
 ########## MULTISTABILITY HISTOGRAM ############
 ## This will plot a histogram showing the number of states per model in initial simulations
-summary_df_fname <- file.path(dataDir,"state_summary_df.Rds")
-summary_df <- readRDS(summary_df_fname)
-summary_hist_df_in <- summary_df
-# reformatting to match expected col names & values
-colnames(summary_hist_df_in) <- c("MODEL_NO", "NO_STATES", "StateIdentity")
-summary_hist_df_in[which(summary_hist_df_in$StateIdentity == 1), "StateIdentity"] <- "E"
-summary_hist_df_in[which(summary_hist_df_in$StateIdentity == 2), "StateIdentity"] <- "M"
-summary_hist_df_in[which(summary_hist_df_in$StateIdentity == "bistable"), "StateIdentity"] <- "Bistable"
+pyracipe_summary_rds_fname <- file.path(dataDir,"pyracipe_summary.Rds")
+pyracipe_summary <- readRDS(pyracipe_summary_rds_fname)
+summary_hist_df_in <- pyracipe_summary
 
 # Ensure summary has the expected structure
 count_df <- summary_hist_df_in %>%
@@ -136,10 +152,12 @@ print(square_plot(image))
 dev.off()
 
 
+
 ########## WT PCA (ALL) ############
 ## PCA scatterplot of unperturbed steady states
 
-pca_fname <- file.path(dataDir,"pca_2025.Rds")
+# PCA
+pca_fname <- file.path(dataDir,"pca_uniques.Rds")
 pca <- readRDS(pca_fname)
 pca_df <- as.data.frame(pca$x)
 pc1_weight <- round(100*summary(pca)$importance[2,1],2)
@@ -163,18 +181,22 @@ pdf(pca_plot_fname, width = 10, height = 10)
 print(image)
 dev.off()
 
-
 ########## PCA LOADINGS ############
-## Plot PCA loadings for all genes
+## Plot PCA loadings for n top contributing genes
 
 loadings_df <- as.data.frame(pca$rotation)
 loadings_df$gene <- rownames(loadings_df)
+n <- 30
+top_genes <- loadings_df %>%
+  dplyr::mutate(mag = abs(PC1) + abs(PC2)) %>%
+  dplyr::arrange(desc(mag)) %>%
+  dplyr::slice(1:30)
 
 image <- ggplot(loadings_df, aes(x = PC1, y = PC2, label = gene)) +
   geom_point(color = "darkblue", size=4) +
   geom_hline(yintercept=0, color="black", alpha=0.5) +
   geom_vline(xintercept=0, color="black", alpha=0.5) +
-  geom_text_repel(size = 10, hjust = 0, vjust = 1, 
+  geom_text_repel(data=top_genes, size = 10, hjust = 0, vjust = 1, 
                   box.padding = 0.2,         # padding around points
                   point.padding = 0.1,       # connection between point and label
                   max.overlaps = Inf,
@@ -188,11 +210,10 @@ image <- ggplot(loadings_df, aes(x = PC1, y = PC2, label = gene)) +
   labs(x = plot_xlab, y = plot_ylab)
 image
 
-loading_plot_fname <- file.path(plotDir, "PCA_loadings.pdf")
+loading_plot_fname <- file.path(plotDir, paste0("PCA_loadings_top",n,".pdf"))
 pdf(loading_plot_fname, width = 10, height = 10)
 print(image)
 dev.off()
-
 
 ########## CLUSTER K SELECTION ############
 ## Line plot of silhouette score vs number of clusters
@@ -223,7 +244,6 @@ dev.off()
 
 clust_all_fname <- file.path(dataDir,"clust_all_2025.Rds") 
 clust_full <- readRDS(clust_all_fname)
-num_pcs_clustering <- 15 # First 15 PCs cover ~93% of variance
 
 # PCA
 image <- ggplot(pca_df) +
@@ -243,25 +263,38 @@ pdf(cluster_plot_fname, width = 10, height = 10)
 print(square_plot(image))
 dev.off()
 
+
 ########## BISTABLE PCA ############
 ## Here we will plot all states of E/M bistable models (colored by cluster),
 ## as well as all initial conditions for clamping simulations
 
-models_selected_fname <- file.path(dataDir,"racipe_bistable_indexMap_2025.Rds")
-models_selected <- readRDS(models_selected_fname)
+# First, select E/M bistable models
+pyracipe_metadata_rds_fname <- file.path(dataDir,"pyracipe_metadata.Rds")
+pyracipe_summary_rds_fname <- file.path(dataDir,"pyracipe_summary.Rds")
+pyracipe_metadata <- readRDS(pyracipe_metadata_rds_fname)
+pyracipe_summary <- readRDS(pyracipe_summary_rds_fname)
 
-ss_unique_fname <- file.path(dataDir,"ss_unique_df.Rds")
-ss_unique <- readRDS(ss_unique_fname)
-all_bistable_states <- which(ss_unique$Model %in% models_selected)
-
+keep_models <- pyracipe_summary[which(pyracipe_summary$NO_STATES == 2 &
+                                        pyracipe_summary$StateIdentity == "Bistable"),"MODEL_NO"]
+keep_states <- c()
+keep_states_e <- c()
+for(model in keep_models) {
+  model_states_all <- pyracipe_metadata[which(pyracipe_metadata$MODEL_NO == model), "Index"]
+  model_state_e <- pyracipe_metadata[which(pyracipe_metadata$MODEL_NO == model &
+                                             pyracipe_metadata$Cluster == 1), "Index"]
+  keep_states <- c(keep_states, model_states_all)
+  keep_states_e <- c(keep_states_e, model_state_e)
+}
 
 # first, plot all E/M bistable states
-image <- ggplot(pca_df[all_bistable_states,], aes(x=PC1, y=PC2, color=as.factor(clust_full[all_bistable_states]))) +
+image <- ggplot(pca_df[keep_states,], aes(x=PC1, y=PC2, color=as.factor(clust_full[keep_states]))) +
   geom_point(size=3) +
   guides(color=guide_legend(title = "Cluster")) +
   scale_color_manual(values=cbPalette) +
   xlab(plot_xlab) +
   ylab(plot_ylab) +
+  xlim(-6, 12.5) +
+  ylim(-6, 7) + 
   theme_sticcc() +
   theme(axis.line = element_line(linewidth = 1, color = "black"), 
         axis.ticks = element_line(linewidth = 1, color="black"),
@@ -276,14 +309,14 @@ dev.off()
 
 
 # plot initial conditions for perturbation sims: E states from bistable models
-image <- ggplot(pca_df[all_bistable_states,], aes(x=PC1, y=PC2, color=as.factor(clust_full[all_bistable_states]))) +
+image <- ggplot(pca_df[keep_states_e,], aes(x=PC1, y=PC2, color=as.factor(clust_full[keep_states_e]))) +
   geom_point(size=3) +
   guides(color=guide_legend(title = "Cluster")) +
   scale_color_manual(values=cbPalette) +
   xlab(plot_xlab) +
   ylab(plot_ylab) +
-  xlim(-5, 7) +
-  ylim(-4.5, 2.5) + 
+  xlim(-6, 12.5) +
+  ylim(-6, 7) + 
   theme_sticcc() +
   theme(axis.line = element_line(linewidth = 1, color = "black"), 
         axis.ticks = element_line(linewidth = 1, color="black"),
@@ -300,26 +333,29 @@ dev.off()
 ## finally, plot all states, and overlay the selected E/M bistable states 
 image <- ggplot(pca_df[,], aes(x=PC1, y=PC2, color=as.factor(clust_full))) +
   geom_point(size=3, alpha=0.7) +
-  geom_point(data=pca_df[which(ss_unique$Model %in% models_selected),], 
-             aes(x=PC1, y=PC2, fill=as.factor(clust_full[which(ss_unique$Model %in% models_selected)])), 
+  geom_point(data=pca_df[keep_states,], 
+             aes(x=PC1, y=PC2, fill=as.factor(clust_full[keep_states])), 
              size=3, color="black", pch=21) +
   guides(color=guide_legend(title = "Cluster"), fill="none") +
   scale_color_manual(values=cbPalette) +
   scale_fill_manual(values=cbPalette) +
   xlab(plot_xlab) +
   ylab(plot_ylab) +
+  xlim(-6, 12.5) +
+  ylim(-6, 7) + 
   theme_sticcc() +
   theme(axis.line = element_line(linewidth = 1, color = "black"), 
         axis.ticks = element_line(linewidth = 1, color="black"),
         panel.background = element_rect("white"),
         plot.background = element_rect("white")
-  )
+        )
 image
 
 pca_plot_fname <- file.path(plotDir,"pca_wt_states_all_bistableOverlay.pdf")
 pdf(pca_plot_fname, height = 10, width = 10)
 print(image)
 dev.off()
+
 
 
 ########## CLAMP VALUES ############
@@ -403,9 +439,6 @@ print(image + scale_y_log10())
 dev.off()
 
 
-
-
-
 ########## COMPARE ALL STATES VS E/M BISTABLE ############
 ## We notice that DEGs between E and M are different for all states vs just E/M bistable states
 ## Here we plot the difference in DEG rankings 
@@ -423,9 +456,8 @@ assign_cluster_DEGs <- function(expr, cluster_labels, p_thresh = 0.05) {
   return(top_table)
 }
 
-cluster_degs_all <- assign_cluster_DEGs(t(ss_unique[,genes]), factor(clust_full))
-cluster_degs_bistable <- assign_cluster_DEGs(t(ss_unique[which(ss_unique$Model %in% models_selected),]), 
-                                             factor(clust_full[which(ss_unique$Model %in% models_selected)]))
+cluster_degs_all <- assign_cluster_DEGs(t(pyracipeNorm), factor(clust_full))
+cluster_degs_bistable <- assign_cluster_DEGs(t(pyracipeNorm[keep_states,]), factor(clust_full[keep_states]))
 
 
 # Assign ranks (lower = higher rank)
@@ -472,7 +504,6 @@ pdf(em_gene_ranking_fname, height = 10, width = 10)
 print(image)
 dev.off()
 
-
 ########## GENE EXPRESSION HEATMAP ############
 ## Here we will plot heatmaps showing gene expression by cluster for 1) all steady states, and 2) E/M bistable model states
 ha_df <- data.frame(Cluster=clust_full)
@@ -482,179 +513,57 @@ column_annotation <- HeatmapAnnotation(df = ha_df,
                                        col=list(Cluster=c("1"=unname(cbPalette[1]),"2"=unname(cbPalette[2]),
                                                           "3"=unname(cbPalette[3]),"4"=unname(cbPalette[4]))))
 # Create the heatmap with annotation
-image <- Heatmap(as.matrix(t(exprMat_norm[ss_unique$StateIndex,1:nGenes])), 
+top_genes <- rownames(cluster_degs_all)[1:30]
+image <- Heatmap(as.matrix(t(pyracipeNorm[,top_genes])), 
                  name = "Expression", 
                  top_annotation = column_annotation,
                  row_names_gp=gpar(fontsize=12),
                  show_column_names = F)
 image
 
-wt_hmap_fname <- file.path(plotDir,"wt_hmap_allStates.pdf")
+wt_hmap_fname <- file.path(plotDir,"wt_hmap_allStates_top30Genes.pdf")
 pdf(wt_hmap_fname, height = 10, width = 10)
 print(image)
 dev.off()
 
-wt_hmap_fname_jpg <- file.path(plotDir,"wt_hmap_allStates.jpg")
+wt_hmap_fname_jpg <- file.path(plotDir,"wt_hmap_allStates_top30Genes.jpg")
 jpeg(wt_hmap_fname_jpg, height = 6, width = 6, units="in", res = 300)
 print(image)
 dev.off()
 
 ## Now for just bistable states
-ha_df <- data.frame(Cluster=clust_full[which(ss_unique$Model %in% models_selected)])
+ha_df <- data.frame(Cluster=clust_full[keep_states])
 
 # Create an annotation object for the columns
 column_annotation <- HeatmapAnnotation(df = ha_df, 
                                        col=list(Cluster=c("1"=unname(cbPalette[1]),"2"=unname(cbPalette[2]),
                                                           "3"=unname(cbPalette[3]),"4"=unname(cbPalette[4]))))
 # Create the heatmap with annotation
-image <- Heatmap(as.matrix(t(exprMat_norm[ss_unique[which(ss_unique$Model %in% models_selected),"StateIndex"],genes])), 
+top_genes <- rownames(cluster_degs_bistable)[1:30]
+image <- Heatmap(as.matrix(t(pyracipeNorm[keep_states,top_genes])), 
                  name = "Expression", 
                  top_annotation = column_annotation,
                  row_names_gp=gpar(fontsize=12),
                  show_column_names = F)
 image
 
-wt_hmap_fname <- file.path(plotDir,"wt_hmap_bistableStates.pdf")
+wt_hmap_fname <- file.path(plotDir,"wt_hmap_bistableStates_top30Genes.pdf")
 pdf(wt_hmap_fname, height = 10, width = 10)
 print(image)
 dev.off()
 
-wt_hmap_fname_jpg <- file.path(plotDir,"wt_hmap_bistableStates.jpg")
+wt_hmap_fname_jpg <- file.path(plotDir,"wt_hmap_bistableStates_top30Genes.jpg")
 jpeg(wt_hmap_fname_jpg, height = 6, width = 6, units="in", res = 300)
 print(image)
 dev.off()
 
 
-
-
-########## NOISE-ONLY CONTROL - SYMMETRY ############
-ctrl_data_dir <- file.path(dataDir, "noise_only_controls")
-ctrl_noise_levels <- c(0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.15, 0.2, 0.5, 1, 2)
-ctrl_trials_per_noise <- 10
-ctrl_tcorr <- 10
-ctrl_results_df_fname <- file.path(ctrl_data_dir,
-                                   paste0("ctrl_summary_trials=",ctrl_trials_per_noise,
-                                          "_noise=",paste0(ctrl_noise_levels, collapse = ","),
-                                          "_tcorr=",ctrl_tcorr))
-ctrl_results_df <- readRDS(ctrl_results_df_fname)
-
-
-image <- ggplot(ctrl_results_df, aes(x=as.factor(Noise), y=PctConverting*100, fill=as.factor(Noise))) +
-  geom_boxplot() +
-  ylab("Models Undergoing EMT (%)") +
-  xlab("Noise") +
-  ylim(0, 75) +
-  guides(fill=guide_legend(title="Noise")) +
-  theme_sticcc() +
-  theme(axis.line = element_line(linewidth = 1, color = "black"), 
-        axis.ticks = element_line(linewidth = 1, color="black"),
-        plot.background = element_rect("white"))
-image
-
-plot_fname <- file.path(plotDir,"noiseOnlyControl_efficacy_EMT_tau=10.pdf")
-pdf(plot_fname, height = 10, width = 10)
-print(image)
-dev.off()
-
-image <- ggplot(ctrl_results_df, aes(x=as.factor(Noise), y=PctRebellious*100, fill=as.factor(Noise))) +
-  geom_boxplot() +
-  ylab("Models Undergoing MET (%)") +
-  xlab("Noise") +
-  ylim(0, 75) +
-  guides(fill=guide_legend(title="Noise")) +
-  theme_sticcc() +
-  theme(axis.line = element_line(linewidth = 1, color = "black"), 
-        axis.ticks = element_line(linewidth = 1, color="black"),
-        plot.background = element_rect("white"))
-image
-
-plot_fname <- file.path(plotDir,"noiseOnlyControl_efficacy_MET_tau=10.pdf")
-pdf(plot_fname, height = 10, width = 10)
-print(image)
-dev.off()
-
-
-
-ctrl_long <- ctrl_results_df %>%
-  select(Noise, PctConverting, PctRebellious) %>%
-  pivot_longer(cols = c(PctConverting, PctRebellious),
-               names_to = "TransitionType",
-               values_to = "Pct") %>%
-  mutate(TransitionType = recode(TransitionType,
-                                 PctConverting = "EMT",
-                                 PctRebellious = "MET"),
-         Pct = Pct * 100)
-
-# Create the combined plot
-image <- ggplot(ctrl_long, aes(x = as.factor(Noise), y = Pct, fill = TransitionType)) +
-  geom_boxplot(position = position_dodge(width = 0.75)) +
-  ylab("Models Undergoing Transition (%)") +
-  xlab("Noise") +
-  ylim(0, 65) +
-  guides(fill = guide_legend(title = "Transition")) +
-  theme_sticcc() +
-  scale_fill_manual(values = cbPalette[c(6,5)]) +
-  theme(axis.line = element_line(linewidth = 1, color = "black"), 
-        axis.ticks = element_line(linewidth = 1, color = "black"),
-        plot.background = element_rect("white"))
-image
-
-# Save the plot
-plot_fname <- file.path(plotDir, "noiseOnlyControl_efficacy_combined_tau=10.pdf")
-pdf(plot_fname, height = 10, width = 10)
-print(image)
-dev.off()
-
-
-########## MODEL-WISE SYMMETRY ############
-
-## Heatmap of model-wise bias by noise
-mat_df <- ctrl_summary_df %>%
-  mutate(bias = EMT_Count - MET_Count) %>%
-  select(Model, Noise, bias) %>%
-  pivot_wider(names_from = Noise, values_from = bias, values_fill = 0) %>%
-  column_to_rownames("Model")
-bias_mat <- as.matrix(mat_df)
-image <- Heatmap(
-  bias_mat,
-  name = "EMT - MET",
-  col = colorRamp2(c(-max(abs(bias_mat)), 0, max(abs(bias_mat))), c("steelblue", "white", "firebrick")),
-  cluster_rows = TRUE,
-  cluster_columns = FALSE,
-  show_row_names = FALSE,
-  row_title = "Models",
-  column_title = "Noise Levels",
-  row_title_gp = gpar(fontsize=30),
-  column_title_gp = gpar(fontsize=30),
-  column_names_gp = gpar(fontsize=28),
-  heatmap_legend_param = list(title = "Bias Score")
-)
-image
-
-
-modelwise_bias_heatmap_fname <- file.path(plotDir, "modelwise_bias_heatmap.pdf")
-pdf(file = modelwise_bias_heatmap_fname, width = 10, height = 10)
-print(image)
-dev.off()
-
-## Bar chart of top biased models
-top_models <- bias_by_model %>%
-  dplyr::slice_max(abs(bias_score), n = 20)
-
-ggplot(top_models, aes(x = reorder(Model, bias_score), y = bias_score, fill = direction)) +
-  geom_col() +
-  coord_flip() +
-  scale_fill_manual(values = c("EMT-biased" = "firebrick", "MET-biased" = "steelblue", "Neutral" = "grey70")) +
-  labs(title = "Top Biased Models", x = "Model", y = "EMT – MET Count") +
-  theme_minimal()
-
-
+########## MODEL-WISE ASYMMETRY ############
 
 ## Multiple ICs - plot basin boundaries
-asym_models_use <- c(144, 589, 601)
-asym_model_use <- 601 # Using the first E/M bistable model in the list
-asym_model_params <- sracipeParams(racipe)[asym_model_use,]
-asym_model_states <- ss_unique[which(ss_unique$Model == asym_model_use),genes]
+asym_model_use <- 3 # Using the first E/M bistable model in the list
+asym_model_params <- pyracipe_params[asym_model_use,]
+asym_model_states <- pyracipe_raw_states[which(pyracipe_metadata$MODEL_NO == asym_model_use),genes]
 asym_multIC_fname <- file.path(dataDir, paste0("multIC_asym_model_",asym_model_use,".Rds"))
 asym_multIC <- readRDS(asym_multIC_fname)
 
@@ -672,7 +581,7 @@ asym_multIC_ss_norm[,genes] <- sweep(asym_multIC_ss_norm[,genes], 2, tmpMeans, F
 asym_multIC_ss_norm[,genes] <- sweep(asym_multIC_ss_norm[,genes], 2, tmpSds, FUN = "/") # scale
 asym_multIC_ss_pca <- scale(asym_multIC_ss_norm, pca$center, pca$scale) %*% pca$rotation
 # replace w/ GMM clustering?
-asym_multIC_ss_clusts <- knn_classifier(asym_multIC_ss_pca[,1:num_pcs_clustering], pca_df_full[,1:num_pcs_clustering], clust_full, k=25)
+asym_multIC_ss_clusts <- knn_classifier(asym_multIC_ss_pca[,1:num_pcs_clustering], pca_df[,1:num_pcs_clustering], clust_full, k=25)
 
 # pca-transform ICs
 asym_multIC_ic_norm <- as.data.frame(t(sracipeIC(asym_multIC)))[,genes]
@@ -768,9 +677,9 @@ for(asym_noise_level in asym_noise_levels) {
   pdf(file = asym_longStoch_plot_fname, width = 10, height = 10)
   print(image)
   dev.off()
-  
-  
-  
+    
+    
+    
   
   
 }
@@ -778,26 +687,32 @@ for(asym_noise_level in asym_noise_levels) {
 ########## SIGNAL EFFICACY HEATMAP ############
 # Plot 2D heatmap at different noise levels
 # Note: only works with 2-gene signals included
+#resultSet_full <- readRDS()
+
+
 signal_simTime <- 500
 signal_relaxTime <- 50
 signal_nGenes <- c(1,2)
-signal_noise <- c(0, 0.04, 0.2) #0.04
+signal_noise <- c(0, 0.02, 0.04) 
 signal_tcorr <- 10
 initClust <- 1
 tgtClust <- 2
-expName <- paste0("bhtopo_t=",signal_simTime,"_relax_OUnoise=",paste0(signal_noise, collapse = "."),
+expName <- paste0("ffctopo_t=",signal_simTime,"_relax_OUnoise=",paste0(signal_noise, collapse = "."),
                   "_tau=",signal_tcorr,"_genes=",paste0(signal_nGenes,collapse = "."),"_CLAMPS_2025")
 resultSet_fname <- file.path(topoDir,expName,"result_summary.Rds")
+genes_x_transitions_matrix_fname <- file.path(topoDir, expName, "genes_x_transitions_matrix.Rds")
 resultSet_full <- readRDS(resultSet_fname)
+resultSet <- resultSet_full
+
 selectedNoise <- 0.04
 eff_hmap_0.04 <- resultSet_full[which(resultSet_full$Noise == selectedNoise),
                                 c("Species 1", "Species 2", "ConversionPct")]
 
-eff_hmap_0.04_matrix <- matrix(nrow = length(genes), ncol = length(genes))
-rownames(eff_hmap_0.04_matrix) <- genes_reordered
-colnames(eff_hmap_0.04_matrix) <- genes_reordered
-for(gene1 in genes_reordered) {
-  for (gene2 in genes_reordered) {
+eff_hmap_0.04_matrix <- matrix(nrow = 72, ncol = 72)
+rownames(eff_hmap_0.04_matrix) <- genes
+colnames(eff_hmap_0.04_matrix) <- genes
+for(gene1 in genes) {
+  for (gene2 in genes) {
     if(gene1 == gene2) {
       eff_val <- eff_hmap_0.04[which(eff_hmap_0.04$`Species 1` == gene1 & 
                                        is.na(eff_hmap_0.04$`Species 2`)), "ConversionPct"]
@@ -853,12 +768,30 @@ print(image)
 dev.off()
 
 
+########## ESTIMATE CONTROL EFFICACY ############
+## Since ~15 genes have almost zero difference in expression across E/M bistable states,
+## we will use the data from noisy simulations targeting these genes as "control" cases
+## this will illuminate the efficacy of noise alone in driving EMT
+
+static_genes <- rownames(cluster_degs_bistable)[which(abs(cluster_degs_bistable$logFC) < 1e-10)]
+noise_use <- 0.04
+summary(resultSet_full[which(resultSet_full$NumGenes == 1 &
+                               resultSet_full$`Species 1` %in% static_genes & 
+                               resultSet_full$Noise == noise_use),"ConversionPct"])
+summary(resultSet_full[which(resultSet_full$NumGenes == 1 &
+                               resultSet_full$`Species 1` %in% static_genes & 
+                               resultSet_full$Noise == 0),"ConversionPct"])
 
 ########## SIGNAL EFFICACY VS TOPOLOGY ############
 ## Plot signal efficacy against a network topology metrics of signals: closeness & betweenness centrality, out-degree 
-resultSet <- resultSet_full
+cor(resultSet_full$GroupBetweenCentrality, resultSet_full$ConversionPct)
+cor(resultSet_full$GroupBetweenCentrality[which(resultSet_full$Noise == 0)], 
+    resultSet_full$ConversionPct[which(resultSet_full$Noise == 0)])
+cor(resultSet_full$GroupBetweenCentrality[which(resultSet_full$Noise == 0.04)], 
+    resultSet_full$ConversionPct[which(resultSet_full$Noise == 0.04)])
+
 selectedNoise <- 0.04
-image <- ggplot(resultSet[which(resultSet$Noise == selectedNoise),], aes(x=GroupBetweenCentrality, y=ConversionPct)) +
+image <- ggplot(resultSet[which(resultSet$Noise == selectedNoise),], aes(x=GroupBetweenCentrality, y=ConversionPct*100)) +
   geom_point(size=3) +
   theme_sticcc() +
   theme(axis.line = element_line(linewidth = 1, color = "black"), 
@@ -917,370 +850,229 @@ dev.off()
 
 
 
-
-
-########## COMPARISON TO BOOLEAN MODEL ############
-signal_summary_df_fname <- file.path(dataDir,"signal_summary_df.Rds")
-signal_summary_df <- readRDS(signal_summary_df_fname)
-
-## Compare 1-gene signals
-sigEffs_1gene_racipe_fname <- file.path(dataDir, "sigEffs_1gene_comparison.Rds")
-sigEffs_1gene_racipe <- readRDS(sigEffs_1gene_racipe_fname)
-
-
-ggplot() +
-  geom_point(data=sigEffs_1gene_racipe, aes(x=1:26, y=ConversionPct), color="red") +
-  geom_point(data=sigEffs_1gene_racipe, aes(x=1:26, y=ConversionPct_Spin), color="blue")
-
-diff_df <- data.frame(Signal=sigEffs_1gene_racipe$`Species 1`,
-                      Diff=sigEffs_1gene_racipe$ConversionPct_Spin - sigEffs_1gene_racipe$ConversionPct)
-ggplot(data=diff_df[which(!is.na(diff_df$Diff)),]) +
-  geom_bar(stat="identity", aes(x=Signal, fill=Signal, y=Diff)) +
-  ylab("Conversion %, Spin - RACIPE") +
-  xlab("Signal") +
-  theme_sticcc() +
-  theme(axis.line = element_line(color = "black"),
-        axis.text.x = element_text(angle=90))
-
-ggplot() +
-  geom_point(data=sigEffs_1gene_racipe, aes(x=ConversionPct, y=ConversionPct_Spin), size=3) +
-  xlab("RACIPE Conversion %") +
-  ylab("Spin Conversion %") +
-  theme_sticcc() +
-  theme(axis.line = element_line(color = "black"))
-
-indices <- which(!is.na(sigEffs_1gene_racipe$ConversionPct_Spin))
-cor(sigEffs_1gene_racipe$ConversionPct[indices], sigEffs_1gene_racipe$ConversionPct_Spin[indices], 
-    use = "complete.obs", method = "spearman")
-
-## Compare 2-gene signals
-
-sigEffs_2gene_racipe_fname <- file.path(dataDir, "sigEffs_2gene_comparison.Rds")
-sigEffs_2gene_racipe <- readRDS(sigEffs_2gene_racipe_fname)
-
-
-diff_df <- data.frame(Signal=paste0(sigEffs_2gene_racipe$`Species 1`,"_",sigEffs_2gene_racipe$`Species 2`),
-                      Rank=order(sigEffs_2gene_racipe$ConversionPct),
-                      Diff=sigEffs_2gene_racipe$ConversionPct_Spin - sigEffs_2gene_racipe$ConversionPct)
-ggplot(data=diff_df[which(!is.na(diff_df$Diff)),]) +
-  geom_point(aes(x=Rank, y=Diff), size=3) +
-  ylab("Conversion %, Spin - RACIPE") +
-  xlab("Signal Rank") +
-  theme_sticcc() +
-  theme(axis.line = element_line(color = "black"),
-        axis.text.x = element_text(angle=90))
-
-
-ggplot() +
-  geom_point(data=sigEffs_2gene_racipe, aes(x=ConversionPct, y=ConversionPct_Spin), size=3) +
-  xlab("RACIPE Conversion %") +
-  ylab("Spin Conversion %") +
-  theme_sticcc() +
-  theme(axis.line = element_line(color = "black"))
-
-
-## Now combine with info from 5B (betweenness centrality)
-sigEffs_2gene_racipe$Signal <- paste0(sigEffs_2gene_racipe$`Species 1`, "_", sigEffs_2gene_racipe$`Species 2`)
-signal_summary_compare <- merge(sigEffs_2gene_racipe, signal_summary_df, by="Signal")
-image <- ggplot() +
-  geom_point(data=signal_summary_compare, aes(x=ConversionPct, y=ConversionPct_Spin, color=GroupBetweenCentrality), size=3) +
-  xlab("RACIPE Conversion %") +
-  ylab("Spin Conversion %") +
-  scale_color_gradient(name="Betweenness") +
-  theme_sticcc() +
-  theme(axis.line = element_line(color = "black"))
-image
-
-plot_fname <- file.path(plotDir,paste0("fig4b_spin_vs_racipe_betweenness_noise=",selectedNoise,".pdf"))
-pdf(plot_fname, width = 10, height = 10)
-print(image)
-dev.off()
-
-
-
-cor(signal_summary_compare$ConversionPct, signal_summary_compare$ConversionPct_Spin,
-    use = "complete.obs", method = "spearman")
-cor(signal_summary_compare$ConversionPct, signal_summary_compare$GroupBetweenCentrality,
-    use = "complete.obs", method = "spearman")
-cor(signal_summary_compare$ConversionPct_Spin, signal_summary_compare$GroupBetweenCentrality,
-    use = "complete.obs", method = "spearman")
-
-
-indices <- which(!is.na(sigEffs_2gene_racipe$ConversionPct_Spin))
-cor(sigEffs_2gene_racipe$ConversionPct[indices], sigEffs_2gene_racipe$ConversionPct_Spin[indices], 
-    use = "complete.obs", method = "spearman")
-
-
-
-# try removing signals where sigEff_spin is one
-# sigEffs_2gene_racipe <- sigEffs_2gene_racipe[which(sigEffs_2gene_racipe$ConversionPct_Spin != 1),]
-# cor(sigEffs_2gene_racipe$ConversionPct, sigEffs_2gene_racipe$ConversionPct_Spin, 
-#     use = "complete.obs", method = "spearman")
-
-## Bland-altman plot
-ranks_racipe <- rank(sigEffs_2gene_racipe$ConversionPct)
-ranks_spin <- rank(sigEffs_2gene_racipe$ConversionPct_Spin)
-
-plot(ranks_racipe, ranks_spin)
-
-# Calculate means and differences
-means <- (ranks_racipe + ranks_spin) / 2
-differences <- ranks_racipe - ranks_spin
-
-spinEffOne <- as.factor(sigEffs_2gene_racipe$ConversionPct_Spin == 1)
-
-# Create a Bland-Altman Plot
-bland_altman_plot <- ggplot(data = NULL, aes(x = means, y = differences, color=spinEffOne)) +
-  geom_point() +  # Add points
-  geom_hline(yintercept = mean(differences), linetype = "dashed", color = "red") +  # Add mean line
-  geom_hline(yintercept = mean(differences) + 1.96 * sd(differences), linetype = "dashed", color = "blue") +  # Add upper limit
-  geom_hline(yintercept = mean(differences) - 1.96 * sd(differences), linetype = "dashed", color = "blue") +  # Add lower limit
-  labs(x = "Average Rank", y = "Difference in Rank", title = "Bland-Altman Plot for Ranking Comparisons") +
-  theme_minimal()
-
-# Display the plot
-print(bland_altman_plot)
-
-
-
-
-########## SINGLE-MODEL TRAJECTORY ############
-## TODO: imports, setup, clean up plots
-
-hd_traj_model <- 10 # 10, 297, 144
-hd_traj_simTime <- 100
-hd_traj_tcorr <- 10
-hd_traj_num_trials <- 10
-hd_traj_sig <- "Zeb1_noise=0.04"
-attemptNo <- 1
-hd_traj_models <- c(10, 297, 144, 589, 601)
-
-for(hd_traj_model in hd_traj_models) {
-  modelDataDir <- file.path(dataDir,paste0("trajectories_model",hd_traj_model))
-  if(!dir.exists(modelDataDir)) {
-    dir.create(modelDataDir)
-  }
-  for(attemptNo in 1:hd_traj_num_trials) {
-    traj_fname <- file.path(modelDataDir,paste0("trajectory_model",hd_traj_model,
-                                                "_simTime=",hd_traj_simTime,
-                                                "_SIG=",hd_traj_sig,"_tau=",hd_traj_tcorr,"_v",attemptNo,".Rds"))
-    traj_pca_fname <- file.path(modelDataDir,paste0("trajectoryPCA_model",hd_traj_model,
-                                                    "_simTime=",hd_traj_simTime,
-                                                    "_SIG=",hd_traj_sig,"_tau=",hd_traj_tcorr,"_v",attemptNo,".Rds"))
-    
-    hd_traj_pca <- readRDS(traj_pca_fname)
-    hd_traj_df_long <- readRDS(traj_fname)
-    hd_traj_df_full <- pivot_wider(
-      hd_traj_df_long,
-      names_from = "Gene",      # Column with names to become new columns
-      values_from = "Expression" # Column with values to fill the new columns
-    )
-    
-    
-    modelPlotDir <- file.path(plotDir,paste0("trajectories_model",hd_traj_model))
-    if(!dir.exists(modelPlotDir)) {
-      dir.create(modelPlotDir)
+########## EFFECT OF NOISE BY SIGNAL ############
+if(all(selectedNoise == c(0, 0.04, 0.2))) {
+  signal_summary_df <- data.frame(Signal=unique(paste0(resultSet_full[,c("Species 1")], "_",
+                                                       resultSet_full[,c("Species 2")])),
+                                  ConversionPct_D0=NA,
+                                  ConvertingModels_D0=NA,
+                                  ConversionPct_D0.04=NA,
+                                  ConvertingModels_D0.04=NA,
+                                  ConversionPct_D0.2=NA,
+                                  ConvertingModels_D0.2=NA)
+  noises <- c(0, 0.04, 0.2)
+  for(sig in signal_summary_df$Signal) {
+    signal_summary_df[which(signal_summary_df$Signal==sig),"GroupClosenessCentrality"] <- 
+      unique(resultSet_full[which(resultSet_full$SigName_Short == sig),"GroupClosenessCentrality"])
+    signal_summary_df[which(signal_summary_df$Signal==sig),"GroupBetweenCentrality"] <- 
+      unique(resultSet_full[which(resultSet_full$SigName_Short == sig),"GroupBetweenCentrality"])
+    for(noise in noises) {
+      signal_summary_df[which(signal_summary_df$Signal==sig),paste0("ConversionPct_D",noise)] <- 
+        resultSet_full[which(resultSet_full$Noise == noise & 
+                               resultSet_full$SigName_Short == sig),"ConversionPct"]
+      signal_summary_df[which(signal_summary_df$Signal==sig),paste0("ConvertingModels_D",noise)] <- 
+        resultSet_full[which(resultSet_full$Noise == noise & 
+                               resultSet_full$SigName_Short == sig),"ConvertingModels"]
     }
-    
-    
-    gene_subsets <- list(
-      'E Markers' = c("Cdh1","miR141","miR34a","miR101",
-                      "miR200a","miR200b","miR200c","Ovol2","Grhl2","Cldn7"),
-      'M Markers' = c("Vim","Snai1","Snai2",
-                      "Twist1","Twist2","Foxc2","Gsc",
-                      "Klf8","Tcf3","Tgfbeta"),
-      'Clamp Genes' = c("Zeb1")
-      #'Disconnected' = c("Np63a","miR9","miR30c","miR205")
-    )
-    
-    # Assign each gene to a subset
-    hd_traj_df_long$Subset <- sapply(hd_traj_df_long$Gene, function(gene) {
-      subset_name <- names(gene_subsets)[sapply(gene_subsets, function(subset) gene %in% subset)]
-      if (length(subset_name) > 0) subset_name else NA
-    })
-    
-    # Filter out genes not in any subset
-    filtered_df <- hd_traj_df_long[!is.na(hd_traj_df_long$Subset),]
-    
-    # Calculate average and standard error for each subset and time point
-    avg_traj_df <- filtered_df %>%
-      group_by(Subset, Time) %>%
-      summarize(
-        Mean_Expression = mean(Expression),
-        SE_Expression = sd(Expression) / sqrt(n()),
-        .groups = "drop"
-      )
-    
-    # Plot the average trajectory with error bars
-    image <- ggplot(avg_traj_df[which(avg_traj_df$Time <= 200),], aes(x = Time, y = Mean_Expression, color = Subset)) +
-      geom_line(linewidth=2) +
-      theme_sticcc() +
-      theme(
-        axis.line = element_line(linewidth = 1, color = "black"), 
-        axis.ticks = element_line(linewidth = 1, color = "black"),
-        axis.title = element_text(size = 32),
-        axis.text = element_text(size = 28),
-        plot.background = element_rect("white")
-      ) +
-      labs(y = "Average Expression", x = "Time", color = "Gene Subset", fill = "Gene Subset")
-    
-    image
-    
-    
-    
-    traj_plot_fname <- file.path(modelPlotDir, paste0("trajectory_model",hd_traj_model,
-                                                      "_simTime=",hd_traj_simTime,
-                                                      "_SIG=",hd_traj_sig,"_tau=",hd_traj_tcorr,"_v",attemptNo,".pdf"))
-    pdf(traj_plot_fname, height = 10, width = 10)
-    print(image)
-    dev.off()
-    
-    
-    
-    
-    # Plot trajectory, with model states in red
-    hd_traj_model_idx <- as.numeric(gsub("Model","",names(models_selected)[which(models_selected == hd_traj_model)])) # for retrieving relevant state
-    model_states <- ss_unique[which(ss_unique$Model == hd_traj_model), ]
-    model_states_norm <- model_states
-    model_states_norm[,1:length(genes)] <- log2(1+model_states_norm[,1:length(genes)]) # Log transform
-    model_states_norm[,1:length(genes)] <- sweep(model_states_norm[,1:length(genes)], 2, tmpMeans, FUN = "-") # scale
-    model_states_norm[,1:length(genes)] <- sweep(model_states_norm[,1:length(genes)], 2, tmpSds, FUN = "/") # scale
-    model_states_pca <- as.data.frame(predict(pca, model_states_norm[,names(tmpMeans)]))
-    model_states_pca
-    
-    
-    # Ensure hd_traj_pca only includes Time <= 100
-    hd_traj_pca_filtered <- hd_traj_pca %>%
-    filter(Time <= 100)
-    # Select points at every 10 time units for markers
-    icon_points <- hd_traj_pca_filtered %>%
-      filter(Time %% 10 == 0)
-    
-    # Create the plot
-    image <- ggplot(pca_df_full[unique_state_idx_list_all,]) +
-      geom_point(aes(x = PC1, y = PC2)) +  # Base points
-      # Trajectory points and path
-      #geom_point(data = hd_traj_pca_filtered, aes(x = PC1, y = PC2, color = Time)) +
-      geom_path(data = hd_traj_pca_filtered, aes(x = PC1, y = PC2, color = Time)) +
-      # Highlight specific time points with icons (customize shape if needed)
-      geom_point(data = icon_points, aes(x = PC1, y = PC2, color=Time), size = 3) +
-      # Model states in red
-      geom_point(data = model_states_pca, aes(x = PC1, y = PC2), color = "red", size = 3) +
-      theme_sticcc() +
-      xlab(plot_xlab) +
-      ylab(plot_ylab) +
-      theme(axis.line = element_line(linewidth = 1, color = "black"), 
-            axis.ticks = element_line(linewidth = 1, color = "black"),
-            axis.title = element_text(size = 32),
-            axis.text = element_text(size = 28),
-            plot.background = element_rect("white")
-      ) +
-      scale_color_gradient() 
-    image
-    
-    
-    traj_plot_pca_fname <- file.path(modelPlotDir, paste0("trajectoryPCA_model",hd_traj_model,
-                                                          "_simTime=",hd_traj_simTime,
-                                                          "_SIG=",hd_traj_sig,"_tau=",hd_traj_tcorr,"_v",attemptNo,".pdf"))
-    pdf(traj_plot_pca_fname, height = 10, width = 10)
-    print(image)
-    dev.off()
-    
   }
-}
-
-
-
-
-
-
-
-########## TRANSITION TIME VS NOISE ############
-num_trials <- 10
-time_trial_noise_levels <- c(0, 0.02, 0.04, 0.08, 0.1, 0.2, 0.5)
-time_trial_simTime <- 300
-times <- c(seq(2, 30, 2), seq(35, 100, 5), seq(120, time_trial_simTime, 20))
-
-time_trial_resultSet_fname <- file.path(dataDir,"Zeb1_timeTrial_paramSets.Rds")
-time_trial_resultSet <- readRDS(time_trial_resultSet_fname)
-time_trial_setIDList <- rownames(time_trial_resultSet)
-time_trial_sig_names <- time_trial_resultSet$SetName#paste0(time_trial_sig_gene,"_noise=",time_trial_noise_levels)
-time_trial_expName_list <- paste0("bhtopo_timeTrial_t=",time_trial_simTime,
-                                  "_relax_OUnoise=",time_trial_resultSet[time_trial_setIDList, "Noise"],
-                                  "_tau=",signal_tcorr,
-                                  "_SIG=",time_trial_resultSet[time_trial_setIDList, "SetName"],
-                                  "_runNo=",rep(seq(num_trials),each=length(time_trial_noise_levels)))
-
-## multiSet_times (import)
-## times (??)
-
-multiSet_fname <- file.path(dataDir,
-                            paste0("Zeb1_transition_time_trials=",num_trials,
-                                   "_noise=",paste0(time_trial_noise_levels, collapse = ","),"_",".Rds"))
-multiSet_times <- readRDS(multiSet_fname)
-
-
-
-
-## Plot conversions vs time
-plot_df_list <- list()
-idx <- 1
-for(setIDNo in seq_along(time_trial_setIDList)) {
-  setID <- time_trial_setIDList[setIDNo]
-  setName <- time_trial_resultSet[setID, "SetName"]
-  sampleSet_times <- multiSet_times[[setIDNo]]
+  signal_summary_df$D0.04_Gain_Pct <- signal_summary_df$ConversionPct_D0.04 - signal_summary_df$ConversionPct_D0
+  signal_summary_df$D0.04_Gain_Pct_ofRemaining <- (signal_summary_df$ConversionPct_D0.04 - signal_summary_df$ConversionPct_D0) / (1-signal_summary_df$ConversionPct_D0)
   
-  for(timeID in seq_along(times)) {
-    time <- times[timeID]
-    newrow <- list(Signal=setName, Time=time, Conversions=sampleSet_times[[timeID]][[1]])
-    plot_df_list[[idx]] <- newrow
-    idx <- idx+1
+  ggplot(signal_summary_df) +
+    geom_histogram(aes(x=ConvertingModels_D0.04-ConvertingModels_D0))
+  
+  ggplot(signal_summary_df) +
+    geom_point(aes(x=GroupClosenessCentrality, y=D0.04_Gain_Pct))
+  
+  ggplot(signal_summary_df) +
+    geom_point(aes(x=GroupBetweenCentrality, y=D0.04_Gain_Pct))
+  
+  ggplot(signal_summary_df) +
+    geom_point(aes(x=GroupBetweenCentrality, y=D0.04_Gain_Pct_ofRemaining)) +
+    theme_sticcc() +
+    xlab("Betweenness Centrality") +
+    ylab("Signal Efficacy, 0.04 vs 0")
+  
+  # ggplot(signal_summary_df) +
+  #   geom_point(aes(x=OutDegree, y=D0.04_Gain_Pct_ofRemaining)) +
+  #   theme_sticcc() +
+  #   xlab("Out-Degree") +
+  #   ylab("Signal Efficacy, 0.04 vs 0")
+  
+  
+  # Heatmap showing gains from noise by signal
+  
+  eff_gains_0.04_matrix <- matrix(nrow = 26, ncol = 26)
+  rownames(eff_gains_0.04_matrix) <- genes_reordered
+  colnames(eff_gains_0.04_matrix) <- genes_reordered
+  for(gene1 in genes_reordered) {
+    for (gene2 in genes_reordered) {
+      comb1 <- paste0(gene1, "_", gene2)
+      comb2 <- paste0(gene2, "_", gene1)
+      if(gene1 == gene2) {
+        eff_val <- signal_summary_df[which(signal_summary_df$Signal == paste0(gene1,"_NA")), "D0.04_Gain_Pct_ofRemaining"]
+      } else if(length(which(signal_summary_df$Signal == comb1)) == 1) {
+        eff_val <- signal_summary_df[which(signal_summary_df$Signal == comb1), "D0.04_Gain_Pct_ofRemaining"]
+      } else {
+        eff_val <- signal_summary_df[which(signal_summary_df$Signal == comb2), "D0.04_Gain_Pct_ofRemaining"]
+      }
+      eff_gains_0.04_matrix[gene1, gene2] <- eff_val
+      eff_gains_0.04_matrix[gene2, gene1] <- eff_val
+    }
   }
+  
+  
+  
+  eff_gains_0.04_matrix[lower.tri(eff_gains_0.04_matrix)] <- NA
+  
+  # Define the color mapping
+  library(circlize)
+  library(viridis)
+  # Define the color mapping using viridis
+  col_fun <- colorRamp2(c(min(eff_gains_0.04_matrix, na.rm = TRUE), 
+                          mean(eff_gains_0.04_matrix, na.rm = TRUE), 
+                          max(eff_gains_0.04_matrix, na.rm = TRUE)), 
+                        viridis(3))  # Generates 3 colors from viridis
+  
+  
+  # Generate the heatmap
+  image <- Heatmap(eff_gains_0.04_matrix, 
+                   name = "Eff. Increase", 
+                   col = col_fun, 
+                   cluster_rows = FALSE, 
+                   cluster_columns = FALSE, 
+                   show_row_names = TRUE, 
+                   show_column_names = TRUE,
+                   row_names_gp = gpar(fontsize=20),
+                   column_names_gp = gpar(fontsize=20),
+                   column_names_rot = 55,
+                   column_names_side = "top",
+                   row_title = "Gene 1",
+                   row_title_gp = gpar(fontsize=24),
+                   column_title = "Gene 2",
+                   column_title_gp = gpar(fontsize=24),
+                   column_title_side = "bottom")
+  image
+  
+  plot_fname <- file.path(plotDir,paste0("figS1c_2gene_sigEffFromNoise_heatmap_noise=",paste0(selectedNoise,collapse = ","),".pdf"))
+  pdf(plot_fname, height = 10, width = 10)
+  print(image)
+  dev.off()
   
 }
 
-plot_df <- do.call(rbind, lapply(plot_df_list, function(x) as.data.frame(t(x))))
-plot_df$Time <- as.numeric(plot_df$Time)
-plot_df$Conversions <- as.numeric(plot_df$Conversions)
-plot_df$Signal <- as.character(plot_df$Signal)
-plot_df$Noise <- as.numeric(gsub("Zeb1_noise=", "", plot_df$Signal))
-plot_df$ConversionPct <- plot_df$Conversions / 500 * 100
 
 
-summary_df <- plot_df %>%
-  group_by(Time, Noise, Signal) %>%
-  summarise(
-    mean_conv = mean(ConversionPct),
-    sd_conv = sd(ConversionPct),
-    .groups = "drop"
-  )
-
-# Step 2: Plot with error bars
-image <- ggplot(summary_df[which(summary_df$Noise < 0.5),], aes(x = Time, y = mean_conv, color = as.factor(Noise))) +
-  geom_line(linewidth = 1.2) +
-  geom_errorbar(aes(ymin = mean_conv - sd_conv, ymax = mean_conv + sd_conv), 
-                width = 0.2, linewidth = 0.8) +
-  #facet_wrap(~Signal) +  # Optional: only if Signal should be faceted
-  theme_sticcc() +
-  theme(
-    axis.line = element_line(linewidth = 1, color = "black"), 
-    axis.ticks = element_line(linewidth = 1, color = "black"),
-    axis.title = element_text(size = 28),
-    axis.text = element_text(size = 24),
-    plot.background = element_rect("white")
-  ) +
-  labs(
-    y = "Conversion % (mean ± SD)",
-    color = "Noise"
-  )
-
-image
+########## CELL-WISE SIGNAL EFFICACY HEATMAP ############
+cell_signal_df_noise <- c(0.04) # which noise levels to consider when plotting top signals
+numToPlot <- 30 # how many of the top signals to plot
+cell_signal_df_fname <- file.path(topoDir,expName,
+                                  paste0("cell_signal_df_noise=", 
+                                         paste0(signal_noise, collapse = ","),".Rds"))
+cell_signal_df <- readRDS(cell_signal_df_fname)
+cell_signal_df <- cell_signal_df[,which(resultSet$Noise == cell_signal_df_noise)]
 
 
-transitions_vs_time_vs_noise_fname <- file.path(plotDir,paste0("transitions_vs_noise_sigGene=Zeb1.pdf"))
-pdf(file = transitions_vs_time_vs_noise_fname, width = 10, height = 10)
+numeric_df <- matrix(as.numeric(factor(as.matrix(cell_signal_df), 
+                                       levels = c("Rebellious", "Target->Target", "Init->Init", "Init->Target"))),
+                     nrow = nrow(cell_signal_df), ncol = ncol(cell_signal_df))
+colnames(numeric_df) <- colnames(cell_signal_df)
+
+
+# select signals to plot
+filterIdx <- order(resultSet$ConversionPct[which(resultSet$Noise == cell_signal_df_noise)], decreasing = T)[1:numToPlot]
+filter <- resultSet[which(resultSet$Noise == cell_signal_df_noise)[filterIdx],"SetName"]
+# subset for those with available data
+filter <- filter[which(filter %in% colnames(numeric_df))]
+filterIdx <- filterIdx[which(filter %in% colnames(numeric_df))]
+numeric_df <- numeric_df[,filter]
+
+
+# Convert the categories to factors and then back to numerics to ensure unique coding
+numeric_df_factor <- as.numeric(as.factor(numeric_df))
+
+# Create a matrix from the factorized data
+matrix_data <- matrix(numeric_df_factor, nrow = nrow(numeric_df), ncol = ncol(numeric_df))
+colnames(matrix_data) <- gsub("_noise=0.04", "", colnames(cell_signal_df)[filterIdx])
+
+# Define color palette 
+#color_palette <- c("red", "lightblue", "pink", "darkblue") 
+color_palette <- c("pink", "darkblue") 
+
+
+
+
+
+# Perform hierarchical clustering on the columns (Conditions)
+model_clusters <- as.factor(cutree(hclust(dist(matrix_data)), k=4))
+ha_df <- data.frame(Cluster=model_clusters)
+
+# Create an annotation object for the columns
+# Color palette
+cbPalette <- palette.colors(palette = "Okabe-Ito")[2:9]
+names(cbPalette) <- c(1:8)
+column_annotation <- HeatmapAnnotation(df = ha_df, 
+                                       col=list(Cluster=c("1"=unname(cbPalette[1]),"2"=unname(cbPalette[2]),
+                                                          "3"=unname(cbPalette[3]),"4"=unname(cbPalette[4]))))
+
+# Define a color palette for the heatmap (same as before)
+#color_palette <- c("red", "lightblue", "pink", "darkblue") # adjust as needed
+color_palette <- c("pink", "darkblue")
+
+# Row annotation
+colnames(resultSet)
+ra_df <- resultSet[filterIdx,c("TotalOutDegree", "GroupBetweenCentrality")]
+colnames(ra_df) <- c("OutDeg","Centrality")
+#ra_df$Noise <- factor(ra_df$Noise)
+row_annotation <- rowAnnotation(df = ra_df)
+
+# Create the heatmap with annotation
+image <- Heatmap(t(matrix_data), 
+                 name = "EMT Result", 
+                 col = colorRamp2(c(min(matrix_data):max(matrix_data)), color_palette), # using categorical colors
+                 #top_annotation = column_annotation,
+                 right_annotation = row_annotation,
+                 row_names_gp=gpar(fontsize=18),
+                 show_row_names = T,
+                 show_column_names = F,
+                 clustering_method_columns = "ward.D2",
+                 clustering_method_rows = "ward.D2")
+
+
+hmap_fname <- file.path(plotDir,paste0("cellwise_efficacy_heatmap_noise=",
+                                       paste0(selectedNoise, collapse=","),"_top30.pdf"))
+pdf(hmap_fname, height = 12, width = 12)
 print(image)
 dev.off()
+
+dev.off()
+lgd = Legend(labels = c("MET","M \U2192 M", "E \U2192 E", "EMT"), 
+             title = "EMT Result", 
+             legend_gp = gpar(fill = color_palette),
+             labels_gp = gpar(fontsize = 16),
+             title_gp = gpar(fontsize = 16, fontface="bold"),
+             size=unit(3,"cm"))
+cairo_pdf(file.path(plotDir,"hmap_legend_manual.pdf"), height=6, width=6, family="Arial")
+image <- draw(lgd)
+dev.off()
+
+
+# # Plot PCA colored by model clusters
+# image <- ggplot(pca_df, aes(x=PC1,y=PC2, color=model_clusters)) +
+#   scale_color_manual(values=cbPalette[1:4]) +
+#   geom_point(size=3) +
+#   guides(color=guide_legend(title = "Model Cluster")) + 
+#   theme_sticcc() +
+#   theme(axis.line = element_line(linewidth = 1, color = "black"), 
+#         axis.ticks = element_line(linewidth = 1, color="black"))
+# 
+# plot_fname <- file.path(plotDir,
+#                         paste0("pca_by_transitionLikelihood_noise=", 
+#                                paste0(selectedNoise, collapse = ","),".pdf"))
+# pdf(plot_fname, height = 10, width = 10)
+# print(image)
+# dev.off()
+
 
 
 
