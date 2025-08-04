@@ -607,6 +607,28 @@ dev.off()
 
 
 ########## MODEL-WISE SYMMETRY ############
+ctrl_summary_df_fname <- file.path(ctrl_data_dir,"ctrl_summary_df_modelwise.Rds")
+ctrl_summary_df <- readRDS(ctrl_summary_df_fname)
+
+ctrl_summary_df$bias_score <- ctrl_summary_df$EMT_Count - ctrl_summary_df$MET_Count
+ctrl_summary_df$bias_ratio <- (ctrl_summary_df$EMT_Count - ctrl_summary_df$MET_Count) / (ctrl_summary_df$EMT_Count + ctrl_summary_df$MET_Count + 1e-6)
+bias_by_model <- ctrl_summary_df %>%
+  dplyr::group_by(Model) %>%
+  dplyr::summarize(num_transitions_total = sum(EMT_Count + MET_Count),
+                   bias_score = sum(EMT_Count - MET_Count),
+                   bias_ratio = sum(EMT_Count - MET_Count) / sum(EMT_Count + MET_Count))
+bias_by_model$direction <- case_when(
+  bias_by_model$bias_ratio > 0.3 ~ "EMT-biased",
+  bias_by_model$bias_ratio < -0.3 ~ "MET-biased",
+  TRUE ~ "Neutral"
+)
+
+
+
+top_models <- bias_by_model %>%
+  dplyr::slice_max(abs(bias_score), n = 20)
+top_models
+
 
 ## Heatmap of model-wise bias by noise
 mat_df <- ctrl_summary_df %>%
@@ -774,6 +796,92 @@ for(asym_noise_level in asym_noise_levels) {
   
   
 }
+
+########## MODEL BIAS CORRELATIONS ############
+# Look at differences in parameters between E-biased and M-biased models
+racipe_bistable_fname <- file.path(dataDir,"racipe_bistable_2025.Rds")
+racipe_bistable_raw <- readRDS(racipe_bistable_fname)
+
+emt_biased_models <- which(bias_by_model$direction == "EMT-biased")
+met_biased_models <- which(bias_by_model$direction == "MET-biased")
+
+emt_params <- sracipeParams(racipe_bistable_raw)[emt_biased_models,]
+met_params <- sracipeParams(racipe_bistable_raw)[met_biased_models,]
+
+param_test_results <- data.frame(
+  Parameter = character(),
+  p_value = numeric(),
+  median_EMT = numeric(),
+  median_MET = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Loop through parameters
+for (paramNo in 1:ncol(emt_params)) {
+  param_name <- colnames(emt_params)[paramNo]
+  emt_vals <- emt_params[, paramNo]
+  met_vals <- met_params[, paramNo]
+  
+  # Perform Wilcoxon test
+  test_result <- wilcox.test(emt_vals, met_vals)
+  
+  # Record results
+  param_test_results <- rbind(param_test_results, data.frame(
+    Parameter = param_name,
+    p_value = test_result$p.value,
+    median_EMT = median(emt_vals),
+    median_MET = median(met_vals),
+    stringsAsFactors = FALSE
+  ))
+}
+
+# adjust for multiple testing
+param_test_results$adj_p_value <- p.adjust(param_test_results$p_value, method = "BH")
+
+# View top hits
+param_test_results <- param_test_results %>% arrange(adj_p_value)
+print(head(param_test_results))
+
+
+# Select top k parameters
+top_params <- param_test_results %>%
+  arrange(adj_p_value) %>%
+  slice(1:10) %>%
+  pull(Parameter)
+
+# Prepare long-format data for ggplot
+emt_df <- emt_params[, top_params, drop=FALSE] %>%
+  as.data.frame() %>%
+  mutate(Bias = "EMT-biased")
+
+met_df <- met_params[, top_params, drop=FALSE] %>%
+  as.data.frame() %>%
+  mutate(Bias = "MET-biased")
+
+plot_df <- bind_rows(emt_df, met_df) %>%
+  pivot_longer(
+    cols = -Bias,
+    names_to = "Parameter",
+    values_to = "Value"
+  )
+
+# Boxplot
+ggplot(plot_df, aes(x = Parameter, y = Value, fill = Bias)) +
+  geom_boxplot(outlier.size = 0.5, linewidth = 0.3) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_text(size = 14),
+    axis.text = element_text(size = 12)
+  ) +
+  scale_y_log10() +
+  scale_fill_manual(values = c("EMT-biased" = "#E64B35", "MET-biased" = "#4DBBD5")) +
+  labs(
+    x = "Parameter",
+    y = "Parameter Value",
+    fill = "Model Bias",
+    title = paste("Top", 10, "Differential Parameters Between EMT- and MET-biased Models")
+  )
 
 ########## SIGNAL EFFICACY HEATMAP ############
 # Plot 2D heatmap at different noise levels
